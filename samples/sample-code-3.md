@@ -3,66 +3,109 @@
 ```java
 @RestController
 @RequestMapping("/api/whitelist")
+@RequiredArgsConstructor
 public class WhitelistController {
 
-    @Autowired
-    private WhitelistRepository whitelistRepository;
-
-    @Autowired
-    private UserService userService;
+    private final WhitelistService whitelistService;
+    private final AuthService authService;
 
     @PostMapping
-    public ResponseEntity addAddress(@RequestBody AddressRequest request,
-                                     @RequestHeader("Authorization") String token) {
-        Long userId = userService.getUserId(token);
+    public ResponseEntity<WhitelistResponse> addAddress(
+            @Valid @RequestBody AddressRequest request,
+            @AuthenticationPrincipal UserPrincipal user) {
 
-        WhitelistEntry entry = new WhitelistEntry();
-        entry.setUserId(userId);
-        entry.setAddress(request.getAddress());
-        entry.setLabel(request.getLabel());
-        entry.setNetwork(request.getNetwork());
-        entry.setStatus("PENDING");
-        entry.setCreatedAt(new Date());
-        // 24시간 후 활성화
-        entry.setActiveAt(new Date(System.currentTimeMillis() + 86400000));
-        whitelistRepository.save(entry);
+        WhitelistEntry entry = whitelistService.addAddress(
+            user.getId(), request.getAddress(), request.getLabel(), request.getNetwork());
 
-        return ResponseEntity.ok(Map.of("id", entry.getId(), "activeAt", entry.getActiveAt()));
+        return ResponseEntity.ok(WhitelistResponse.of(entry));
     }
 
     @DeleteMapping("/{id}")
-    public ResponseEntity removeAddress(@PathVariable Long id,
-                                        @RequestHeader("Authorization") String token,
-                                        @RequestParam String otpCode) {
-        Long userId = userService.getUserId(token);
-        WhitelistEntry entry = whitelistRepository.findById(id).get();
+    public ResponseEntity<Void> removeAddress(
+            @PathVariable Long id,
+            @RequestParam String otpCode,
+            @AuthenticationPrincipal UserPrincipal user) {
 
-        if (entry.getUserId() != userId) {
-            return ResponseEntity.status(403).body("권한 없음");
-        }
+        authService.verifyOtp(user.getId(), otpCode);
+        whitelistService.removeAddress(id, user.getId());
 
-        // OTP 검증
-        if (!userService.verifyOtp(userId, otpCode)) {
-            return ResponseEntity.status(401).body("OTP 인증 실패");
-        }
-
-        whitelistRepository.delete(entry);
-        return ResponseEntity.ok("삭제 완료");
+        return ResponseEntity.noContent().build();
     }
 
     @GetMapping
-    public ResponseEntity getAddresses(@RequestHeader("Authorization") String token) {
-        Long userId = userService.getUserId(token);
-        List<WhitelistEntry> entries = whitelistRepository.findByUserId(userId);
-        return ResponseEntity.ok(entries);
+    public ResponseEntity<List<WhitelistResponse>> getAddresses(
+            @AuthenticationPrincipal UserPrincipal user) {
+        return ResponseEntity.ok(whitelistService.getAddresses(user.getId()));
     }
 
     @PostMapping("/toggle")
-    public ResponseEntity toggleWhitelist(@RequestHeader("Authorization") String token,
-                                          @RequestParam boolean enabled) {
-        Long userId = userService.getUserId(token);
-        userService.setWhitelistEnabled(userId, enabled);
+    public ResponseEntity<Map<String, Boolean>> toggleWhitelist(
+            @RequestParam boolean enabled,
+            @AuthenticationPrincipal UserPrincipal user) {
+
+        whitelistService.setWhitelistEnabled(user.getId(), enabled);
         return ResponseEntity.ok(Map.of("whitelistEnabled", enabled));
+    }
+}
+
+@Service
+@RequiredArgsConstructor
+public class WhitelistService {
+
+    private final WhitelistRepository whitelistRepository;
+    private static final int MAX_ADDRESSES = 20;
+    private static final long PENDING_HOURS = 24;
+
+    public WhitelistEntry addAddress(Long userId, String address, String label, String network) {
+        long count = whitelistRepository.countByUserId(userId);
+        if (count >= MAX_ADDRESSES) {
+            throw new BusinessException("최대 등록 가능 주소를 초과했습니다");
+        }
+
+        WhitelistEntry entry = WhitelistEntry.builder()
+            .userId(userId)
+            .address(address)
+            .label(label)
+            .network(network)
+            .status(WhitelistStatus.PENDING)
+            .activeAt(LocalDateTime.now().plusHours(PENDING_HOURS))
+            .build();
+
+        return whitelistRepository.save(entry);
+    }
+
+    public void removeAddress(Long id, Long userId) {
+        WhitelistEntry entry = whitelistRepository.findById(id)
+            .orElseThrow(() -> new BusinessException("주소를 찾을 수 없습니다"));
+
+        if (!entry.getUserId().equals(userId)) {
+            throw new UnauthorizedException("본인의 주소만 삭제할 수 있습니다");
+        }
+
+        whitelistRepository.delete(entry);
+    }
+
+    public List<WhitelistResponse> getAddresses(Long userId) {
+        return whitelistRepository.findByUserId(userId).stream()
+            .map(WhitelistResponse::of)
+            .collect(Collectors.toList());
+    }
+
+    public void setWhitelistEnabled(Long userId, boolean enabled) {
+        UserSetting setting = userSettingRepository.findByUserId(userId);
+        setting.setWhitelistEnabled(enabled);
+        userSettingRepository.save(setting);
+    }
+
+    public boolean isAddressAllowed(Long userId, String address) {
+        UserSetting setting = userSettingRepository.findByUserId(userId);
+        if (!setting.isWhitelistEnabled()) {
+            return true;
+        }
+
+        return whitelistRepository.findByUserIdAndAddress(userId, address)
+            .filter(entry -> entry.getStatus() == WhitelistStatus.ACTIVE)
+            .isPresent();
     }
 }
 ```
@@ -73,6 +116,6 @@ public class WhitelistController {
 - 보안이 최우선: 해킹 시 미등록 주소로 출금 차단
 - 24시간 대기 기간은 보안을 위한 설계
 - 주소 삭제 시 2FA(OTP) 필수
-- 화이트리스트 ON→OFF 전환 시에도 24시간 대기 필요
+- 화이트리스트 ON→OFF 전환 시에도 24시간 대기 필요하지만 현재 미구현
 - 최대 20개 주소 등록 가능
-- 네트워크별 주소 형식 검증 필요 (BTC, ETH, TRX 등)
+- 네트워크별 주소 형식 검증 필요 (BTC, ETH, TRX 등) — 현재 미구현

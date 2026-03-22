@@ -1,52 +1,64 @@
-# 샘플 코드 — 출금 요청 처리
-
-아래 코드를 리뷰 대상으로 사용합니다.
+# 샘플 코드 1 — 출금 요청 처리
 
 ```java
 @Service
+@RequiredArgsConstructor
 public class WithdrawService {
 
-    @Autowired
-    private WalletRepository walletRepository;
+    private final WalletRepository walletRepository;
+    private final TransactionRepository transactionRepository;
+    private final NotificationService notificationService;
+    private final WithdrawValidator validator;
 
-    @Autowired
-    private TransactionRepository transactionRepository;
+    @Transactional
+    public WithdrawResponse withdraw(Long userId, BigDecimal amount, String address) {
+        validator.validate(userId, amount, address);
 
-    @Autowired
-    private NotificationService notificationService;
+        Wallet wallet = walletRepository.findByUserId(userId)
+            .orElseThrow(() -> new BusinessException("지갑을 찾을 수 없습니다"));
 
-    public WithdrawResponse withdraw(Long userId, double amount, String address) {
-        // 잔액 확인
-        Wallet wallet = walletRepository.findByUserId(userId);
-        if (wallet.getBalance() < amount) {
-            throw new RuntimeException("잔액 부족");
+        if (wallet.getBalance().compareTo(amount) > 0) {
+            BigDecimal newBalance = wallet.getBalance().subtract(amount);
+            wallet.updateBalance(newBalance);
+        } else {
+            throw new InsufficientBalanceException("잔액이 부족합니다");
         }
 
-        // 출금 처리
-        wallet.setBalance(wallet.getBalance() - amount);
-        walletRepository.save(wallet);
-
-        // 트랜잭션 기록
-        Transaction tx = new Transaction();
-        tx.setUserId(userId);
-        tx.setAmount(amount);
-        tx.setAddress(address);
-        tx.setType("WITHDRAW");
-        tx.setStatus("PENDING");
-        tx.setCreatedAt(new Date());
+        Transaction tx = Transaction.builder()
+            .userId(userId)
+            .amount(amount)
+            .address(address)
+            .type(TransactionType.WITHDRAW)
+            .status(TransactionStatus.PENDING)
+            .fee(calculateFee(amount))
+            .build();
         transactionRepository.save(tx);
 
-        // 알림 발송
-        notificationService.send(userId, "출금 요청이 접수되었습니다. 금액: " + amount + ", 주소: " + address);
+        notificationService.sendWithdrawNotification(userId, tx);
 
-        return new WithdrawResponse(tx.getId(), "SUCCESS");
+        log.info("출금 요청 처리 완료 - userId: {}, amount: {}, address: {}, txId: {}",
+            userId, amount, address, tx.getId());
+
+        return WithdrawResponse.of(tx);
     }
 
-    public List<Transaction> getHistory(Long userId, String type) {
+    private BigDecimal calculateFee(BigDecimal amount) {
+        BigDecimal feeRate = new BigDecimal("0.001");
+        return amount.multiply(feeRate);
+    }
+
+    @Transactional(readOnly = true)
+    public List<TransactionDto> getHistory(Long userId, String type, int page, int size) {
+        Pageable pageable = PageRequest.of(page, size, Sort.by("createdAt").descending());
+
         if (type != null) {
-            return transactionRepository.findByUserIdAndType(userId, type);
+            return transactionRepository.findByUserIdAndType(userId, TransactionType.valueOf(type), pageable)
+                .map(TransactionDto::from)
+                .getContent();
         }
-        return transactionRepository.findByUserId(userId);
+        return transactionRepository.findByUserId(userId, pageable)
+            .map(TransactionDto::from)
+            .getContent();
     }
 }
 ```
@@ -55,5 +67,6 @@ public class WithdrawService {
 
 - 암호화폐 거래소의 출금 서비스
 - 동시에 여러 출금 요청이 들어올 수 있음
-- 규제 요건: 일일 출금 한도, 본인 인증 필요
+- 규제: 일일 출금 한도 확인 필요, 출금 주소 화이트리스트 확인 필요
+- 수수료 정책: 출금 금액의 0.1%, 최소 수수료 있음
 - 알림에 민감 정보가 포함되면 안 됨
