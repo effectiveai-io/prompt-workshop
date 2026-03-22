@@ -57,7 +57,7 @@ Gemini 웹에서 fork한 저장소를 연결합니다.
 이 저장소의 program.md를 읽고,
 prompts/code-review.md를 evaluation/code-review.md 기준으로
 자동 개선 사이클을 3회 실행해줘.
-samples/sample-code.md를 테스트 시나리오로 사용해줘.
+samples/sample-code-1.md를 테스트 시나리오로 사용해줘.
 ```
 
 ### 5. program.md 다듬기
